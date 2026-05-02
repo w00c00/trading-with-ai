@@ -1,0 +1,25 @@
+[project]
+name = "tradai"
+version = "0.1.0"
+description = "AI-assisted automated trading system with OpenAI-compatible providers and exchange adapters."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ccxt>=4.5.0",
+    "cryptography>=42.0.0",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "python-dotenv>=1.0.1",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "respx>=0.21.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

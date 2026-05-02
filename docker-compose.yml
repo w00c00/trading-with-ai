@@ -1,0 +1,8 @@
+services:
+  tradai:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "3471:3471"
+    restart: unless-stopped
