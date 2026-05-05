@@ -129,6 +129,36 @@ class TradingEngine:
                 status="blocked",
                 detail={"reason": plan.block_reason or "hold"},
             )
+        execution_intent = plan.execution_intent or {}
+        contract_intent = bool(execution_intent.get("requires_contract"))
+        if market_type == "spot" and contract_intent:
+            return OrderResult(
+                exchange=exchange.id,
+                symbol=plan.symbol,
+                action=plan.action,
+                quote_size=plan.quote_size,
+                status="blocked",
+                detail={"reason": "contract execution intent cannot be submitted in spot mode", "execution_intent": execution_intent},
+            )
+        if contract_intent and execution_intent.get("requires_hard_stop_loss") and not execution_intent.get("stop_loss"):
+            return OrderResult(
+                exchange=exchange.id,
+                symbol=plan.symbol,
+                action=plan.action,
+                quote_size=plan.quote_size,
+                status="blocked",
+                detail={"reason": "contract execution requires a hard stop_loss before submitting live or paper order", "execution_intent": execution_intent},
+            )
+        preflight_error = _contract_preflight_error(plan)
+        if preflight_error:
+            return OrderResult(
+                exchange=exchange.id,
+                symbol=plan.symbol,
+                action=plan.action,
+                quote_size=plan.quote_size,
+                status="blocked",
+                detail={"reason": preflight_error, "execution_intent": execution_intent},
+            )
         if plan.dry_run:
             result = OrderResult(
                 exchange=exchange.id,
@@ -136,12 +166,12 @@ class TradingEngine:
                 action=plan.action,
                 quote_size=plan.quote_size,
                 status="dry_run",
-                detail={"reason": plan.reason},
+                detail={"reason": plan.reason, "execution_intent": execution_intent, "market_type": market_type},
             )
             if self.settings.notify_dry_run:
                 await self._notify_success(result)
             return result
-        result = await exchange.create_market_order(plan.symbol, plan.action, plan.quote_size)
+        result = await exchange.create_plan_order(plan.symbol, plan.action, plan.quote_size, execution_intent, market_type)
         if result.status not in {"blocked", "rejected", "canceled", "cancelled", "failed"}:
             await self._notify_success(result)
         return result
@@ -175,3 +205,37 @@ def _combine(strategy_action: TradeAction, strategy_confidence: float, ai_action
     if strategy_confidence >= 0.72 and ai_confidence >= 0.62:
         return strategy_action
     return TradeAction.hold
+
+
+def _contract_preflight_error(plan: TradePlan) -> Optional[str]:
+    intent = plan.execution_intent or {}
+    if not intent.get("requires_contract"):
+        return None
+    side = str(intent.get("position_side", "")).lower()
+    stop_loss = _float_or_none(intent.get("stop_loss"))
+    take_profit = _float_or_none(intent.get("take_profit"))
+    reference_price = _float_or_none(intent.get("reference_price"))
+    leverage = _float_or_none(intent.get("leverage"))
+    max_leverage = _float_or_none(intent.get("max_leverage"))
+    if max_leverage is not None and leverage is not None and leverage > max_leverage:
+        return f"leverage {leverage:g} exceeds strategy max {max_leverage:g}"
+    if reference_price is None:
+        return None
+    if side == "long":
+        if stop_loss is not None and stop_loss >= reference_price:
+            return "long stop_loss must be below reference price"
+        if take_profit is not None and take_profit <= reference_price:
+            return "long take_profit must be above reference price"
+    if side == "short":
+        if stop_loss is not None and stop_loss <= reference_price:
+            return "short stop_loss must be above reference price"
+        if take_profit is not None and take_profit >= reference_price:
+            return "short take_profit must be below reference price"
+    return None
+
+
+def _float_or_none(value: object) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

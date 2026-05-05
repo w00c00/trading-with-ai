@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from typing import Any, Optional
+
 from app.models import Candle, OrderResult, TradeAction
 
 
@@ -22,3 +24,13 @@ class ExchangeClient(ABC):
     @abstractmethod
     async def create_market_order(self, symbol: str, action: TradeAction, quote_size: float) -> OrderResult:
         raise NotImplementedError
+
+    async def create_plan_order(
+        self,
+        symbol: str,
+        action: TradeAction,
+        quote_size: float,
+        execution_intent: Optional[dict[str, Any]] = None,
+        market_type: str = "spot",
+    ) -> OrderResult:
+        return await self.create_market_order(symbol, action, quote_size)

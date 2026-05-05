@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import time
 from itertools import count
+from typing import Any, Optional
 
 from app.exchanges.base import ExchangeClient
 from app.models import Candle, OrderResult, TradeAction
@@ -46,6 +47,42 @@ class PaperExchange(ExchangeClient):
             status="paper_filled",
             order_id=f"paper-{next(self._orders)}",
             detail={"estimated_price": price},
+        )
+
+    async def create_plan_order(
+        self,
+        symbol: str,
+        action: TradeAction,
+        quote_size: float,
+        execution_intent: Optional[dict[str, Any]] = None,
+        market_type: str = "spot",
+    ) -> OrderResult:
+        execution_intent = execution_intent or {}
+        if market_type == "spot" or not execution_intent.get("requires_contract"):
+            result = await self.create_market_order(symbol, action, quote_size)
+            result.detail["execution_intent"] = execution_intent
+            result.detail["market_type"] = market_type
+            return result
+        price = _base_price(symbol)
+        amount = quote_size / price
+        return OrderResult(
+            exchange=self.id,
+            symbol=symbol,
+            action=action,
+            quote_size=quote_size,
+            status="paper_filled",
+            order_id=f"paper-contract-{next(self._orders)}",
+            detail={
+                "estimated_price": price,
+                "amount": amount,
+                "market_type": market_type,
+                "contract_mode": True,
+                "execution_intent": execution_intent,
+                "reduce_only": _is_reduce_only(execution_intent),
+                "position_side": execution_intent.get("position_side"),
+                "stop_loss": execution_intent.get("stop_loss"),
+                "take_profit": execution_intent.get("take_profit"),
+            },
         )
 
 
@@ -96,3 +133,8 @@ def _base_price(symbol: str) -> float:
         "ARB": 1.2,
     }
     return prices.get(base, 100.0)
+
+
+def _is_reduce_only(execution_intent: dict[str, Any]) -> bool:
+    intent = str(execution_intent.get("intent", ""))
+    return intent.startswith("close_") or intent in {"reduce_long", "reduce_short"}

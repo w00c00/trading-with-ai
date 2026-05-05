@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import ccxt
 
@@ -81,6 +81,17 @@ class CCXTExchange(ExchangeClient):
         return {asset: float(amount) for asset, amount in totals.items() if amount}
 
     async def create_market_order(self, symbol: str, action: TradeAction, quote_size: float) -> OrderResult:
+        return await self.create_plan_order(symbol, action, quote_size, {}, self._market_type)
+
+    async def create_plan_order(
+        self,
+        symbol: str,
+        action: TradeAction,
+        quote_size: float,
+        execution_intent: Optional[dict[str, Any]] = None,
+        market_type: str = "spot",
+    ) -> OrderResult:
+        execution_intent = execution_intent or {}
         if not self._has_credentials:
             return OrderResult(
                 exchange=self.id,
@@ -88,8 +99,11 @@ class CCXTExchange(ExchangeClient):
                 action=action,
                 quote_size=quote_size,
                 status="failed",
-            detail={"reason": f"{self.id} requires API credentials before live orders can be submitted"},
+                detail={"reason": f"{self.id} requires API credentials before live orders can be submitted"},
             )
+        leverage = execution_intent.get("leverage")
+        if market_type != "spot" and leverage:
+            await self.set_leverage(symbol, float(leverage))
         try:
             ticker = await asyncio.to_thread(self._client.fetch_ticker, symbol)
             last = float(ticker["last"])
@@ -103,8 +117,9 @@ class CCXTExchange(ExchangeClient):
                 status="failed",
                 detail={"reason": f"{self.id} failed to price order: {exc}"},
             )
+        params = _order_params_from_intent(self._exchange_id, execution_intent, market_type)
         try:
-            order = await asyncio.to_thread(self._client.create_order, symbol, "market", action.value, amount)
+            order = await asyncio.to_thread(self._client.create_order, symbol, "market", action.value, amount, None, params)
         except (ccxt.AuthenticationError, ccxt.PermissionDenied) as exc:
             return OrderResult(
                 exchange=self.id,
@@ -114,6 +129,18 @@ class CCXTExchange(ExchangeClient):
                 status="failed",
                 detail={"reason": str(exc)},
             )
+        except ccxt.BaseError as exc:
+            return OrderResult(
+                exchange=self.id,
+                symbol=symbol,
+                action=action,
+                quote_size=quote_size,
+                status="failed",
+                detail={"reason": str(exc), "params": params, "execution_intent": execution_intent},
+            )
+        if isinstance(order, dict):
+            order.setdefault("execution_intent", execution_intent)
+            order.setdefault("params", params)
         return OrderResult(
             exchange=self.id,
             symbol=symbol,
@@ -131,3 +158,33 @@ class CCXTExchange(ExchangeClient):
             await asyncio.to_thread(self._client.set_leverage, leverage, symbol)
         except ccxt.BaseError as exc:
             logger.warning("%s set leverage skipped for %s: %s", self.id, symbol, exc)
+
+
+def _order_params_from_intent(exchange_id: str, execution_intent: dict[str, Any], market_type: str) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if market_type == "spot" or not execution_intent:
+        return params
+    reduce_only = _is_reduce_only(execution_intent)
+    if reduce_only:
+        params["reduceOnly"] = True
+    side = str(execution_intent.get("position_side", "")).lower()
+    if exchange_id == "binance" and side in {"long", "short"}:
+        params["positionSide"] = side.upper()
+    if exchange_id == "bybit" and side in {"long", "short"}:
+        params["positionIdx"] = 1 if side == "long" else 2
+    stop_loss = execution_intent.get("stop_loss")
+    take_profit = execution_intent.get("take_profit")
+    if stop_loss:
+        params["stopLossPrice"] = stop_loss
+        if exchange_id == "bybit":
+            params["stopLoss"] = stop_loss
+    if take_profit:
+        params["takeProfitPrice"] = take_profit
+        if exchange_id == "bybit":
+            params["takeProfit"] = take_profit
+    return params
+
+
+def _is_reduce_only(execution_intent: dict[str, Any]) -> bool:
+    intent = str(execution_intent.get("intent", ""))
+    return intent.startswith("close_") or intent in {"reduce_long", "reduce_short"}

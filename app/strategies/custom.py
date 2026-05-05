@@ -350,6 +350,8 @@ def _execution_intent(definition: dict[str, Any], rule: Optional[dict[str, Any]]
         "requires_contract": bool(execution.get("requires_contract", False)),
         "allowed_actions": execution.get("allowed_actions", []),
         "leverage": _leverage_for_symbol(snapshot.symbol, risk),
+        "max_leverage": _leverage_for_symbol(snapshot.symbol, risk),
+        "reference_price": round(price, 8),
         "max_positions": risk.get("max_positions"),
         "max_dca_layers": execution.get("max_dca_layers"),
         "dca_size_multiplier_max": execution.get("dca_size_multiplier_max"),
