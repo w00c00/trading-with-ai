@@ -51,6 +51,8 @@ def test_dashboard_has_balance_refresh_controls() -> None:
     assert "refreshBalancesButton" in response.text
     assert "balanceTable" in response.text
     assert "交易所可用余额" in response.text
+    assert "loadLatestRun" in response.text
+    assert "tradingWithAi.activeRunId" in response.text
 
 
 def test_config_has_serverchan_test_button() -> None:

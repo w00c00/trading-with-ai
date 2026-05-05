@@ -187,3 +187,20 @@ def test_start_run_dashboard_status() -> None:
             break
         time.sleep(0.1)
     assert client.get(f"/runs/{run_id}").json()["run"]["status"] in {"running", "completed", "failed"}
+
+
+def test_runs_list_exposes_latest_dashboard_run() -> None:
+    client = TestClient(app)
+    response = client.post(
+        "/runs/start",
+        json={"exchange": "paper", "symbols": ["BTC/USDT"], "strategies": ["strategy_ensemble"], "rounds": 1},
+    )
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+
+    listed = client.get("/runs", params={"limit": 5})
+    assert listed.status_code == 200
+    runs = listed.json()["runs"]
+    assert runs
+    assert runs[0]["id"] == run_id
+    assert "elapsed_seconds" in runs[0]

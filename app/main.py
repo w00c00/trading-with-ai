@@ -367,6 +367,13 @@ async def stop_run(run_id: str) -> dict:
     return {"run": _public_run(run)}
 
 
+@app.get("/runs")
+async def list_runs(limit: int = 20) -> dict[str, Any]:
+    safe_limit = min(max(limit, 1), 100)
+    runs = sorted(RUNS.values(), key=lambda item: float(item.get("started_at", 0)), reverse=True)
+    return {"runs": [_public_run(run) for run in runs[:safe_limit]]}
+
+
 @app.get("/runs/{run_id}")
 async def read_run(run_id: str) -> dict:
     run = RUNS.get(run_id)
@@ -1800,8 +1807,10 @@ def _dashboard_html(page: str = "dashboard") -> str:
     const runEventTable = document.getElementById('runEventTable');
     const balanceTable = document.getElementById('balanceTable');
     const chartCanvas = document.getElementById('strategyChart');
-    let currentRunId = null;
+    const ACTIVE_RUN_STORAGE_KEY = 'tradingWithAi.activeRunId';
+    let currentRunId = localStorage.getItem(ACTIVE_RUN_STORAGE_KEY) || null;
     let runPollTimer = null;
+    let balancePollTimer = null;
     let currentGridBotId = null;
     let gridPollTimer = null;
     const fields = {{
@@ -2192,6 +2201,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
     }}
 
     function renderRun(run) {{
+      if (run && run.id) setActiveRunId(run.id);
       fields.runId.textContent = run.id || '-';
       fields.runState.textContent = run.status || '-';
       fields.runRound.textContent = run.round || 0;
@@ -2216,6 +2226,47 @@ def _dashboard_html(page: str = "dashboard") -> str:
       startTradeRunButton.disabled = ['running', 'stopping'].includes(run.status);
     }}
 
+    function setActiveRunId(runId) {{
+      currentRunId = runId || null;
+      if (currentRunId) localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, currentRunId);
+      else localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+    }}
+
+    function startRunPolling() {{
+      if (!currentRunId) return;
+      if (runPollTimer) clearInterval(runPollTimer);
+      runPollTimer = setInterval(() => pollRun().catch((error) => {{
+        fields.runStatus.textContent = String(error.message || error);
+      }}), 1200);
+    }}
+
+    async function loadLatestRun() {{
+      if (currentRunId) {{
+        try {{
+          await pollRun();
+          startRunPolling();
+          return;
+        }} catch (error) {{
+          setActiveRunId(null);
+        }}
+      }}
+      const response = await fetch('/runs?limit=1');
+      const data = await readJsonOrText(response);
+      if (!response.ok) throw new Error(data.detail || '运行状态读取失败');
+      const latest = (data.runs || [])[0];
+      if (latest) {{
+        renderRun(latest);
+        startRunPolling();
+      }} else {{
+        fields.runStatus.textContent = '暂无运行任务';
+      }}
+    }}
+
+    function startBalancePolling() {{
+      if (balancePollTimer) clearInterval(balancePollTimer);
+      balancePollTimer = setInterval(() => refreshBalances(false).catch(() => {{}}), 30000);
+    }}
+
     function renderBalances(data) {{
       fields.balanceExchange.textContent = data.exchange || '-';
       fields.balanceMarketType.textContent = data.market_type || '-';
@@ -2229,9 +2280,11 @@ def _dashboard_html(page: str = "dashboard") -> str:
       balanceTable.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="2">没有读取到余额。</td></tr>';
     }}
 
-    async function refreshBalances() {{
-      refreshBalancesButton.disabled = true;
-      refreshBalancesButton.textContent = '刷新中';
+    async function refreshBalances(showBusy = true) {{
+      if (showBusy) {{
+        refreshBalancesButton.disabled = true;
+        refreshBalancesButton.textContent = '刷新中';
+      }}
       fields.balanceStatus.textContent = '刷新中';
       try {{
         const exchange = document.getElementById('exchange').value || cfgElement('default_exchange').value || 'paper';
@@ -2246,8 +2299,10 @@ def _dashboard_html(page: str = "dashboard") -> str:
         fields.balanceMessage.textContent = String(error.message || error);
         balanceTable.innerHTML = '<tr><td colspan="2">余额读取失败，请检查交易所配置。</td></tr>';
       }} finally {{
-        refreshBalancesButton.disabled = false;
-        refreshBalancesButton.textContent = '刷新余额';
+        if (showBusy) {{
+          refreshBalancesButton.disabled = false;
+          refreshBalancesButton.textContent = '刷新余额';
+        }}
       }}
     }}
 
@@ -2406,12 +2461,9 @@ def _dashboard_html(page: str = "dashboard") -> str:
         }});
         const data = await readJsonOrText(response);
         if (!response.ok) throw new Error(data.detail || '启动策略运行失败');
-        currentRunId = data.run_id;
+        setActiveRunId(data.run_id);
         renderRun(data.run);
-        if (runPollTimer) clearInterval(runPollTimer);
-        runPollTimer = setInterval(() => pollRun().catch((error) => {{
-          fields.runStatus.textContent = String(error.message || error);
-        }}), 1200);
+        startRunPolling();
       }} catch (error) {{
         fields.runStatus.textContent = String(error.message || error);
         rawOutput.textContent = String(error.message || error);
@@ -2465,12 +2517,9 @@ def _dashboard_html(page: str = "dashboard") -> str:
         }});
         const data = await readJsonOrText(response);
         if (!response.ok) throw new Error(data.detail || '启动失败');
-        currentRunId = data.run_id;
+        setActiveRunId(data.run_id);
         renderRun(data.run);
-        if (runPollTimer) clearInterval(runPollTimer);
-        runPollTimer = setInterval(() => pollRun().catch((error) => {{
-          fields.runStatus.textContent = String(error.message || error);
-        }}), 1200);
+        startRunPolling();
       }} catch (error) {{
         fields.runStatus.textContent = String(error.message || error);
       }} finally {{
@@ -2650,9 +2699,17 @@ def _dashboard_html(page: str = "dashboard") -> str:
         return {{ detail: text }};
       }}
     }}
+    async function initializeDashboardState() {{
+      if (currentPage !== 'dashboard') return;
+      await loadLatestRun().catch((error) => {{
+        fields.runStatus.textContent = String(error.message || error);
+      }});
+      await refreshBalances(false).catch(() => {{}});
+      startBalancePolling();
+    }}
     checkHealth();
     showCurrentPage();
-    loadSettings();
+    loadSettings().then(() => initializeDashboardState()).catch(() => initializeDashboardState());
     refreshStrategies().catch(() => {{}});
   </script>
 </body>
