@@ -84,11 +84,24 @@ class TradingEngine:
         action = _combine(signal.action, signal.confidence, ai_decision.action, ai_decision.confidence)
         confidence = max(signal.confidence, ai_decision.confidence) if action != TradeAction.hold else min(signal.confidence, ai_decision.confidence)
         dry_run = exchange.id != "paper" and not self.settings.live_trading_enabled
+        execution_intent = signal.metadata.get("execution_intent", {}) if isinstance(signal.metadata, dict) else {}
         decision_steps = [
             f"策略信号：{signal.action.value}，置信度 {signal.confidence:.2f}，原因：{signal.reason}",
             f"AI 复核：{ai_decision.action.value}，置信度 {ai_decision.confidence:.2f}，原因：{ai_decision.reason}",
             f"合并结果：{action.value}，最终置信度 {confidence:.2f}",
         ]
+        if execution_intent:
+            intent_name = execution_intent.get("intent") or execution_intent.get("mode") or "-"
+            leverage = execution_intent.get("leverage")
+            stop_loss = execution_intent.get("stop_loss")
+            take_profit = execution_intent.get("take_profit")
+            decision_steps.append(
+                "执行意图："
+                f"{intent_name}"
+                f"，杠杆={leverage if leverage is not None else '-'}"
+                f"，止损={stop_loss if stop_loss is not None else '-'}"
+                f"，止盈={take_profit if take_profit is not None else '-'}"
+            )
         if ai_decision.risk_notes:
             decision_steps.append("AI 风险提示：" + "；".join(ai_decision.risk_notes))
         plan = TradePlan(
@@ -101,8 +114,9 @@ class TradingEngine:
             strategy_signal=signal.model_dump(mode="json"),
             ai_decision=ai_decision.model_dump(mode="json"),
             decision_steps=decision_steps,
+            execution_intent=execution_intent,
         )
-        return self._apply_risk(plan, snapshot.position_quote)
+        return self._apply_risk(plan, snapshot.position_quote, market_type)
 
     async def execute_plan(self, plan: TradePlan, exchange_name: Optional[str] = None, market_type: str = "spot") -> OrderResult:
         exchange = self.build_exchange(exchange_name, market_type=market_type)
@@ -139,7 +153,7 @@ class TradingEngine:
         except Exception as exc:
             logger.warning("trade notification failed: %s", exc)
 
-    def _apply_risk(self, plan: TradePlan, position_quote: float) -> TradePlan:
+    def _apply_risk(self, plan: TradePlan, position_quote: float, market_type: str = "spot") -> TradePlan:
         if plan.action != TradeAction.hold and plan.confidence < self.settings.min_ai_confidence:
             plan.blocked = True
             plan.block_reason = f"confidence {plan.confidence:.2f} below threshold {self.settings.min_ai_confidence:.2f}"
@@ -148,6 +162,8 @@ class TradingEngine:
             plan.blocked = True
             plan.block_reason = f"position limit would exceed {self.settings.max_position_quote:.2f} quote"
             plan.decision_steps.append(f"风控拦截：{plan.block_reason}")
+        if market_type == "spot" and plan.execution_intent.get("requires_contract"):
+            plan.decision_steps.append("提示：该策略包含合约语义；现货模式下会降级为买入/卖出/观望信号。")
         return plan
 
 

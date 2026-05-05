@@ -59,6 +59,7 @@ class TradePlan(BaseModel):
     strategy_signal: dict[str, Any] = Field(default_factory=dict)
     ai_decision: dict[str, Any] = Field(default_factory=dict)
     decision_steps: list[str] = Field(default_factory=list)
+    execution_intent: dict[str, Any] = Field(default_factory=dict)
 
 
 class OrderResult(BaseModel):

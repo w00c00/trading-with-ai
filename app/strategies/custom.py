@@ -5,7 +5,7 @@ import os
 import re
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from app.models import MarketSnapshot, StrategySignal, TradeAction
 from app.strategies.base import Strategy
@@ -20,34 +20,28 @@ class RuleStrategy(Strategy):
         self.name = self.definition["name"]
 
     def evaluate(self, snapshot: MarketSnapshot) -> StrategySignal:
+        common_metadata = _definition_metadata(self.definition)
         for rule in self.definition["rules"]:
             matched, reason = _rule_matches(rule, snapshot)
             if matched:
+                metadata = dict(common_metadata)
+                metadata["matched_rule"] = rule
+                metadata["execution_intent"] = _execution_intent(self.definition, rule, snapshot)
                 return StrategySignal(
                     strategy=self.name,
                     action=TradeAction(rule["action"]),
                     confidence=float(rule.get("confidence", 0.6)),
                     reason=reason,
-                    metadata={
-                        "custom": True,
-                        "description": self.definition.get("description", ""),
-                        "source_format": self.definition.get("source_format", "tradai"),
-                        "nofx_config": self.definition.get("nofx_config", {}),
-                        "nofx_prompt_sections": self.definition.get("nofx_prompt_sections", {}),
-                    },
+                    metadata=metadata,
                 )
+        metadata = dict(common_metadata)
+        metadata["execution_intent"] = _execution_intent(self.definition, None, snapshot)
         return StrategySignal(
             strategy=self.name,
             action=TradeAction(self.definition.get("default_action", "hold")),
             confidence=float(self.definition.get("default_confidence", 0.45)),
             reason="No custom rule matched.",
-            metadata={
-                "custom": True,
-                "description": self.definition.get("description", ""),
-                "source_format": self.definition.get("source_format", "tradai"),
-                "nofx_config": self.definition.get("nofx_config", {}),
-                "nofx_prompt_sections": self.definition.get("nofx_prompt_sections", {}),
-            },
+            metadata=metadata,
         )
 
 
@@ -95,6 +89,8 @@ def nofx_strategy_template() -> dict[str, Any]:
 
 
 def normalize_strategy_definition(definition: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(definition, dict) and "rules" in definition:
+        return _ensure_safe_strategy_name(definition)
     if _looks_like_nofx_strategy(definition):
         definition = _convert_nofx_strategy(definition)
     return _ensure_safe_strategy_name(definition)
@@ -120,8 +116,12 @@ def validate_strategy_definition(definition: dict[str, Any]) -> dict[str, Any]:
         "default_confidence": _validate_confidence(definition.get("default_confidence", 0.45)),
         "rules": clean_rules,
         "source_format": str(definition.get("source_format", "tradai"))[:40],
-        "nofx_config": definition.get("nofx_config", {}),
-        "nofx_prompt_sections": definition.get("nofx_prompt_sections", {}),
+        "nofx_config": _redact_sensitive(definition.get("nofx_config", {})),
+        "nofx_prompt_sections": _redact_sensitive(definition.get("nofx_prompt_sections", {})),
+        "nofx_coin_source": _redact_sensitive(definition.get("nofx_coin_source", {})),
+        "nofx_risk_control": _redact_sensitive(definition.get("nofx_risk_control", {})),
+        "nofx_execution": _redact_sensitive(definition.get("nofx_execution", {})),
+        "nofx_indicators": _redact_sensitive(definition.get("nofx_indicators", {})),
     }
 
 
@@ -170,9 +170,11 @@ def _ensure_safe_strategy_name(definition: dict[str, Any]) -> dict[str, Any]:
 def _convert_nofx_strategy(definition: dict[str, Any]) -> dict[str, Any]:
     config = definition.get("config") if isinstance(definition.get("config"), dict) else {}
     source = config or definition
+    coin_source = _get_any(source, "coinSource", "coin_source", "coinConfig", "coin_config") or {}
     indicators = _get_any(source, "indicators", "Indicators") or {}
     risk = _get_any(source, "riskControl", "risk_control", "RiskControl") or {}
     prompts = _get_any(source, "promptSections", "prompt_sections", "prompts") or {}
+    strategy_type = str(_get_any(source, "strategy_type", "strategyType") or "ai_trading")
     raw_name = str(_get_any(definition, "name", "strategyName", "strategy_name", "id") or "nofx_imported_strategy")
     name = _slugify(raw_name)
     display_name = str(_get_any(definition, "display_name", "displayName", "title", "strategyName", "name") or f"NOFX 策略：{name}")[:80]
@@ -184,8 +186,26 @@ def _convert_nofx_strategy(definition: dict[str, Any]) -> dict[str, Any]:
         period = int(rsi_periods[0])
         rules.extend(
             [
-                {"indicator": "rsi", "period": period, "operator": "<", "value": 30, "action": "buy", "confidence": max(default_confidence, 0.68)},
-                {"indicator": "rsi", "period": period, "operator": ">", "value": 70, "action": "sell", "confidence": max(default_confidence, 0.68)},
+                {
+                    "indicator": "rsi",
+                    "period": period,
+                    "operator": "<",
+                    "value": 30,
+                    "action": "buy",
+                    "confidence": max(default_confidence, 0.68),
+                    "intent": "open_long_or_dca_long",
+                    "position_side": "long",
+                },
+                {
+                    "indicator": "rsi",
+                    "period": period,
+                    "operator": ">",
+                    "value": 70,
+                    "action": "sell",
+                    "confidence": max(default_confidence, 0.68),
+                    "intent": "open_short_or_dca_short",
+                    "position_side": "short",
+                },
             ]
         )
 
@@ -195,8 +215,26 @@ def _convert_nofx_strategy(definition: dict[str, Any]) -> dict[str, Any]:
             fast, slow = int(ema_periods[0]), int(ema_periods[-1])
             rules.extend(
                 [
-                    {"indicator": "sma_cross", "fast": fast, "slow": slow, "direction": "above", "action": "buy", "confidence": default_confidence},
-                    {"indicator": "sma_cross", "fast": fast, "slow": slow, "direction": "below", "action": "sell", "confidence": default_confidence},
+                    {
+                        "indicator": "sma_cross",
+                        "fast": fast,
+                        "slow": slow,
+                        "direction": "above",
+                        "action": "buy",
+                        "confidence": default_confidence,
+                        "intent": "open_long",
+                        "position_side": "long",
+                    },
+                    {
+                        "indicator": "sma_cross",
+                        "fast": fast,
+                        "slow": slow,
+                        "direction": "below",
+                        "action": "sell",
+                        "confidence": default_confidence,
+                        "intent": "open_short",
+                        "position_side": "short",
+                    },
                 ]
             )
 
@@ -205,13 +243,44 @@ def _convert_nofx_strategy(definition: dict[str, Any]) -> dict[str, Any]:
         period = int(boll_periods[0])
         rules.extend(
             [
-                {"indicator": "price_vs_sma", "period": period, "operator": ">", "multiplier": 1.01, "action": "buy", "confidence": default_confidence},
-                {"indicator": "price_vs_sma", "period": period, "operator": "<", "multiplier": 0.99, "action": "sell", "confidence": default_confidence},
+                {
+                    "indicator": "price_vs_sma",
+                    "period": period,
+                    "operator": ">",
+                    "multiplier": 1.01,
+                    "action": "buy",
+                    "confidence": default_confidence,
+                    "intent": "breakout_follow_long",
+                    "position_side": "long",
+                },
+                {
+                    "indicator": "price_vs_sma",
+                    "period": period,
+                    "operator": "<",
+                    "multiplier": 0.99,
+                    "action": "sell",
+                    "confidence": default_confidence,
+                    "intent": "breakout_follow_short",
+                    "position_side": "short",
+                },
             ]
         )
 
     if not rules:
-        rules.append({"indicator": "sma_cross", "fast": 12, "slow": 36, "direction": "above", "action": "buy", "confidence": default_confidence})
+        rules.append(
+            {
+                "indicator": "sma_cross",
+                "fast": 12,
+                "slow": 36,
+                "direction": "above",
+                "action": "buy",
+                "confidence": default_confidence,
+                "intent": "open_long",
+                "position_side": "long",
+            }
+        )
+
+    execution = _nofx_execution_profile(strategy_type, indicators, risk, definition, prompts)
 
     return {
         "name": name,
@@ -221,8 +290,12 @@ def _convert_nofx_strategy(definition: dict[str, Any]) -> dict[str, Any]:
         "default_confidence": min(default_confidence, 0.5),
         "rules": rules,
         "source_format": "nofx",
-        "nofx_config": definition,
+        "nofx_config": _redact_sensitive(definition),
         "nofx_prompt_sections": prompts,
+        "nofx_coin_source": coin_source,
+        "nofx_risk_control": risk,
+        "nofx_execution": execution,
+        "nofx_indicators": indicators,
     }
 
 
@@ -235,6 +308,131 @@ def _get_any(source: dict[str, Any], *keys: str) -> Any:
         if key.lower() in lowered:
             return lowered[key.lower()]
     return None
+
+
+def _definition_metadata(definition: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "custom": True,
+        "description": definition.get("description", ""),
+        "source_format": definition.get("source_format", "tradai"),
+        "nofx_config": definition.get("nofx_config", {}),
+        "nofx_prompt_sections": definition.get("nofx_prompt_sections", {}),
+        "nofx_coin_source": definition.get("nofx_coin_source", {}),
+        "nofx_risk_control": definition.get("nofx_risk_control", {}),
+        "nofx_execution": definition.get("nofx_execution", {}),
+        "nofx_indicators": definition.get("nofx_indicators", {}),
+    }
+
+
+def _execution_intent(definition: dict[str, Any], rule: Optional[dict[str, Any]], snapshot: MarketSnapshot) -> dict[str, Any]:
+    execution = definition.get("nofx_execution") or {}
+    risk = definition.get("nofx_risk_control") or {}
+    rule = rule or {}
+    side = str(rule.get("position_side", "none"))
+    action = str(rule.get("action", definition.get("default_action", "hold")))
+    intent = str(rule.get("intent") or _default_intent(action, side))
+    atr_value = _atr(snapshot.candles, int(_first_number(execution.get("atr_periods"), 14)))
+    stop_distance = atr_value * float(execution.get("stop_loss_atr_multiple", 1.5) or 1.5)
+    take_distance = stop_distance * float(execution.get("min_risk_reward_ratio", 1.8) or 1.8)
+    price = snapshot.last_price
+    if side == "short":
+        stop_loss = price + stop_distance if stop_distance else None
+        take_profit = price - take_distance if take_distance else None
+    elif side == "long":
+        stop_loss = price - stop_distance if stop_distance else None
+        take_profit = price + take_distance if take_distance else None
+    else:
+        stop_loss = None
+        take_profit = None
+    return {
+        "intent": intent,
+        "position_side": side,
+        "requires_contract": bool(execution.get("requires_contract", False)),
+        "allowed_actions": execution.get("allowed_actions", []),
+        "leverage": _leverage_for_symbol(snapshot.symbol, risk),
+        "max_positions": risk.get("max_positions"),
+        "max_dca_layers": execution.get("max_dca_layers"),
+        "dca_size_multiplier_max": execution.get("dca_size_multiplier_max"),
+        "hedge_max_ratio": execution.get("hedge_max_ratio"),
+        "requires_hard_stop_loss": execution.get("requires_hard_stop_loss", False),
+        "trailing_take_profit": execution.get("trailing_take_profit", False),
+        "cooldown_after_close_candles": execution.get("cooldown_after_close_candles"),
+        "cooldown_after_stop_candles": execution.get("cooldown_after_stop_candles"),
+        "min_risk_reward_ratio": execution.get("min_risk_reward_ratio"),
+        "stop_loss": round(stop_loss, 8) if stop_loss is not None else None,
+        "take_profit": round(take_profit, 8) if take_profit is not None else None,
+        "risk_model": "atr_structure",
+    }
+
+
+def _default_intent(action: str, side: str) -> str:
+    if action == "buy":
+        return "open_long" if side != "short" else "close_short"
+    if action == "sell":
+        return "open_short" if side != "long" else "close_long"
+    return "wait"
+
+
+def _nofx_execution_profile(
+    strategy_type: str,
+    indicators: dict[str, Any],
+    risk: dict[str, Any],
+    definition: dict[str, Any],
+    prompts: dict[str, Any],
+) -> dict[str, Any]:
+    source_text = " ".join([strategy_type, str(definition.get("name", "")), str(definition.get("description", "")), " ".join(str(value) for value in prompts.values())])
+    is_dca = "dca" in source_text.lower()
+    return {
+        "strategy_type": strategy_type,
+        "requires_contract": True,
+        "allowed_actions": ["open_long", "open_short", "close_long", "close_short", "hold", "wait", "dca_long", "dca_short", "hedge"],
+        "max_positions": risk.get("max_positions", 2),
+        "max_dca_layers": 2 if is_dca else 1,
+        "dca_size_multiplier_max": 1.2,
+        "hedge_max_ratio": 0.5,
+        "requires_hard_stop_loss": True,
+        "trailing_take_profit": True,
+        "cooldown_after_close_candles": 2,
+        "cooldown_after_stop_candles": 4,
+        "min_risk_reward_ratio": _normalize_ratio(risk.get("min_risk_reward_ratio"), 1.8),
+        "stop_loss_atr_multiple": 1.5,
+        "atr_periods": _as_number_list(_get_any(indicators, "atrPeriods", "atr_periods"), [14]),
+        "primary_timeframe": _get_any(_get_any(indicators, "klines") or {}, "primary_timeframe", "primaryTimeframe") or "5m",
+        "selected_timeframes": _get_any(_get_any(indicators, "klines") or {}, "selected_timeframes", "selectedTimeframes") or [],
+    }
+
+
+def _leverage_for_symbol(symbol: str, risk: dict[str, Any]) -> Optional[float]:
+    base = symbol.split("/", 1)[0].upper()
+    if base in {"BTC", "ETH"}:
+        return _float_or_none(risk.get("btc_eth_max_leverage")) or 3
+    return _float_or_none(risk.get("altcoin_max_leverage")) or 2
+
+
+def _atr(candles: list, period: int) -> float:
+    if len(candles) <= 1:
+        return 0.0
+    ranges = []
+    for previous, current in zip(candles[-period - 1 : -1], candles[-period:]):
+        ranges.append(max(current.high - current.low, abs(current.high - previous.close), abs(current.low - previous.close)))
+    return sum(ranges) / max(len(ranges), 1)
+
+
+def _first_number(value: Any, fallback: float) -> float:
+    values = _as_number_list(value, [fallback])
+    return values[0] if values else fallback
+
+
+def _normalize_ratio(value: Any, fallback: float) -> float:
+    parsed = _float_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else fallback
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _slugify(value: str) -> str:
@@ -289,6 +487,19 @@ def _normalize_confidence(value: Any) -> float:
     if confidence > 1:
         confidence /= 100
     return min(max(confidence, 0.0), 1.0)
+
+
+def _redact_sensitive(value: Any) -> Any:
+    sensitive_tokens = ("api_key", "apikey", "secret", "password", "token", "sendkey")
+    if isinstance(value, dict):
+        clean = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            clean[key] = "***REDACTED***" if any(token in key_text for token in sensitive_tokens) else _redact_sensitive(item)
+        return clean
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
 
 
 def save_custom_strategy(definition: dict[str, Any]) -> RuleStrategy:

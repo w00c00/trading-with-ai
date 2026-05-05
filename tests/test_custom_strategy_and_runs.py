@@ -80,6 +80,7 @@ def test_exported_nofx_config_nested_under_config_uploads() -> None:
             },
             "risk_control": {"min_confidence": 70},
             "prompt_sections": {"role_definition": "角色定义"},
+            "indicators_extra": {"nofxos_api_key": "cm_sensitive"},
         },
         "version": "1.0",
     }
@@ -91,6 +92,26 @@ def test_exported_nofx_config_nested_under_config_uploads() -> None:
     assert data["definition"]["source_format"] == "nofx"
     assert data["definition"]["rules"]
     assert data["definition"]["nofx_prompt_sections"]["role_definition"] == "角色定义"
+    assert "nofx_risk_control" in data["definition"]
+    assert data["definition"]["nofx_execution"]["requires_contract"] is True
+
+
+def test_nofx_conversion_redacts_sensitive_api_keys() -> None:
+    client = TestClient(app)
+    definition = {
+        "name": "敏感字段策略",
+        "config": {
+            "coin_source": {"static_coins": ["BTCUSDT"]},
+            "indicators": {"enable_ema": True, "ema_periods": [20, 50], "nofxos_api_key": "cm_sensitive"},
+            "risk_control": {"min_confidence": 70, "secret": "should_not_save"},
+        },
+    }
+    response = client.post("/strategies/upload", json={"definition": definition})
+    assert response.status_code == 200
+    dumped = str(response.json()["definition"])
+    assert "cm_sensitive" not in dumped
+    assert "should_not_save" not in dumped
+    assert "***REDACTED***" in dumped
 
 
 def test_nofx_coin_source_expands_symbols_for_run(monkeypatch) -> None:
@@ -120,6 +141,32 @@ def test_nofx_coin_source_expands_symbols_for_run(monkeypatch) -> None:
     assert data["coin_selection"]["enabled"] is True
     assert "ETH/USDT" in data["symbols"]
     assert "SOL/USDT" in data["symbols"]
+
+
+def test_nofx_dca_strategy_keeps_execution_intent() -> None:
+    client = TestClient(app)
+    definition = {
+        "name": "NOFX仿CoinTech2u_AI对冲DCA",
+        "description": "AI 对冲 DCA，最多2层，禁止无限补仓。",
+        "config": {
+            "coin_source": {"source_type": "static", "static_coins": ["BTCUSDT"]},
+            "indicators": {"enable_ema": True, "ema_periods": [20, 50, 120], "enable_rsi": True, "rsi_periods": [14]},
+            "risk_control": {
+                "max_positions": 2,
+                "btc_eth_max_leverage": 3,
+                "altcoin_max_leverage": 2,
+                "min_risk_reward_ratio": 1.8,
+                "min_confidence": 78,
+            },
+            "prompt_sections": {"entry_standards": "DCA规则：最多2层；对冲仓不能大于主仓50%。"},
+        },
+    }
+    response = client.post("/strategies/upload", json={"definition": definition})
+    assert response.status_code == 200
+    converted = response.json()["definition"]
+    assert converted["nofx_execution"]["max_dca_layers"] == 2
+    assert converted["nofx_execution"]["hedge_max_ratio"] == 0.5
+    assert converted["rules"][0]["intent"] == "open_long_or_dca_long"
 
 
 def test_start_run_dashboard_status() -> None:
