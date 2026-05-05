@@ -1,4 +1,4 @@
-from app.ai.providers import _normalize_model, _parse_model_json
+from app.ai.providers import _normalize_model, _parse_model_json, _safety_hold
 
 
 def test_normalize_minimax_model_alias() -> None:
@@ -34,3 +34,10 @@ def test_parse_model_json_from_plain_text_prefix() -> None:
     parsed = _parse_model_json('结论如下：{"action":"buy","confidence":0.7,"reason":"breakout","risk_notes":[]}')
     assert parsed is not None
     assert parsed["action"] == "buy"
+
+
+def test_safety_hold_marks_ai_request_failure_as_hold() -> None:
+    parsed = _safety_hold("minimax AI 请求超时，已安全降级为观望：ReadTimeout")
+    assert parsed["action"] == "hold"
+    assert parsed["confidence"] == 0.0
+    assert "ReadTimeout" in parsed["risk_notes"][0]

@@ -37,10 +37,11 @@ class CCXTExchange(ExchangeClient):
         if password:
             self._credential_config["password"] = password
         self._client = self._build_client(with_credentials=True)
+        self._public_client = self._build_client(with_credentials=False)
 
     def _build_client(self, with_credentials: bool) -> Any:
         exchange_class = getattr(ccxt, self._exchange_id)
-        config: dict[str, Any] = {"enableRateLimit": True, "options": {"defaultType": self._market_type}}
+        config: dict[str, Any] = {"enableRateLimit": True, "timeout": 20_000, "options": {"defaultType": self._market_type}}
         if with_credentials:
             config.update(self._credential_config)
         client = exchange_class(config)
@@ -53,16 +54,23 @@ class CCXTExchange(ExchangeClient):
 
     async def fetch_ohlcv_since(self, symbol: str, timeframe: str, since: int | None, limit: int = 120) -> list[Candle]:
         try:
-            rows = await asyncio.to_thread(self._client.fetch_ohlcv, symbol, timeframe, since, limit)
-        except (ccxt.AuthenticationError, ccxt.PermissionDenied) as exc:
-            logger.warning("%s candle fetch got credential error; retrying without credentials: %s", self.id, exc)
-            public_client = self._build_client(with_credentials=False)
+            rows = await asyncio.to_thread(self._public_client.fetch_ohlcv, symbol, timeframe, since, limit)
+        except ccxt.BaseError as public_exc:
+            if not self._has_credentials:
+                raise RuntimeError(f"{self.id} failed to fetch {symbol} {timeframe} public candles: {public_exc}") from public_exc
+            logger.warning("%s public candle fetch failed; retrying with configured client: %s", self.id, public_exc)
             try:
-                rows = await asyncio.to_thread(public_client.fetch_ohlcv, symbol, timeframe, since, limit)
-            except ccxt.BaseError as public_exc:
-                raise RuntimeError(f"{self.id} failed to fetch {symbol} {timeframe} candles without credentials: {public_exc}") from public_exc
-        except ccxt.BaseError as exc:
-            raise RuntimeError(f"{self.id} failed to fetch {symbol} {timeframe} candles: {exc}") from exc
+                rows = await asyncio.to_thread(self._client.fetch_ohlcv, symbol, timeframe, since, limit)
+            except (ccxt.AuthenticationError, ccxt.PermissionDenied) as credential_exc:
+                raise RuntimeError(
+                    f"{self.id} failed to fetch {symbol} {timeframe} candles. "
+                    f"Public request failed first: {public_exc}; configured API credentials were rejected: {credential_exc}"
+                ) from credential_exc
+            except ccxt.BaseError as private_exc:
+                raise RuntimeError(
+                    f"{self.id} failed to fetch {symbol} {timeframe} candles. "
+                    f"Public request failed first: {public_exc}; configured-client retry failed: {private_exc}"
+                ) from private_exc
         return [
             Candle(timestamp=int(row[0]), open=float(row[1]), high=float(row[2]), low=float(row[3]), close=float(row[4]), volume=float(row[5]))
             for row in rows

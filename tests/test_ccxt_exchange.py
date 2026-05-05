@@ -29,11 +29,12 @@ def test_live_order_without_credentials_returns_failed_result() -> None:
     assert "requires API credentials" in result.detail["reason"]
 
 
-def test_fetch_ohlcv_retries_without_credentials_after_auth_error() -> None:
+def test_fetch_ohlcv_uses_public_client_before_configured_credentials() -> None:
     exchange = CCXTExchange("bybit", api_key="bad", secret="bad", sandbox=False)
-    calls = {"public": 0}
+    calls = {"public": 0, "private": 0}
 
-    def raise_auth_error(*args):
+    def private_fetch_ohlcv(*args):
+        calls["private"] += 1
         raise ccxt.AuthenticationError('bybit {"retCode":10003,"retMsg":"API key is invalid."}')
 
     class PublicClient:
@@ -41,11 +42,49 @@ def test_fetch_ohlcv_retries_without_credentials_after_auth_error() -> None:
             calls["public"] += 1
             return [[1, 10, 12, 9, 11, 100]]
 
-    exchange._client.fetch_ohlcv = raise_auth_error
+    exchange._client.fetch_ohlcv = private_fetch_ohlcv
     exchange._build_client = lambda with_credentials: PublicClient()
+    exchange._public_client = PublicClient()
     candles = asyncio.run(exchange.fetch_ohlcv("BTC/USDT", "1h", 1))
     assert calls["public"] == 1
+    assert calls["private"] == 0
     assert candles[0].close == 11
+
+
+def test_fetch_ohlcv_retries_configured_client_after_public_error() -> None:
+    exchange = CCXTExchange("bybit", api_key="key", secret="secret", sandbox=False)
+    calls = {"private": 0}
+
+    class PublicClient:
+        def fetch_ohlcv(self, *args):
+            raise ccxt.NetworkError("public timeout")
+
+    def private_fetch_ohlcv(*args):
+        calls["private"] += 1
+        return [[1, 10, 12, 9, 11, 100]]
+
+    exchange._public_client = PublicClient()
+    exchange._client.fetch_ohlcv = private_fetch_ohlcv
+    candles = asyncio.run(exchange.fetch_ohlcv("BTC/USDT", "1h", 1))
+    assert calls["private"] == 1
+    assert candles[0].close == 11
+
+
+def test_fetch_ohlcv_without_credentials_reports_public_error() -> None:
+    exchange = CCXTExchange("bybit", sandbox=False)
+
+    class PublicClient:
+        def fetch_ohlcv(self, *args):
+            raise ccxt.NetworkError("public timeout")
+
+    exchange._public_client = PublicClient()
+    try:
+        asyncio.run(exchange.fetch_ohlcv("BTC/USDT", "1h", 1))
+    except RuntimeError as exc:
+        assert "public candles" in str(exc)
+        assert "public timeout" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
 
 
 def test_contract_intent_maps_to_ccxt_params() -> None:

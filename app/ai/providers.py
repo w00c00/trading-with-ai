@@ -43,7 +43,12 @@ class AIClient:
             headers["X-Title"] = "Trading with AI"
 
         async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
+            try:
+                response = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
+            except httpx.TimeoutException as exc:
+                return _safety_hold(f"{self.provider} AI 请求超时，已安全降级为观望：{type(exc).__name__}")
+            except httpx.RequestError as exc:
+                return _safety_hold(f"{self.provider} AI 请求失败，已安全降级为观望：{type(exc).__name__}: {exc}")
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
@@ -120,3 +125,13 @@ def _parse_model_json(content: Any) -> dict[str, Any] | None:
         if isinstance(parsed, dict):
             return parsed
     return None
+
+
+def _safety_hold(reason: str) -> dict[str, Any]:
+    return {
+        "action": "hold",
+        "confidence": 0.0,
+        "reason": reason,
+        "risk_notes": [reason],
+        "_provider_response": {"error": reason},
+    }
