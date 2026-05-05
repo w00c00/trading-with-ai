@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from app.ai.decision import AIDecisionMaker
 from app.config import Settings
@@ -85,10 +85,16 @@ class TradingEngine:
         confidence = max(signal.confidence, ai_decision.confidence) if action != TradeAction.hold else min(signal.confidence, ai_decision.confidence)
         dry_run = exchange.id != "paper" and not self.settings.live_trading_enabled
         execution_intent = signal.metadata.get("execution_intent", {}) if isinstance(signal.metadata, dict) else {}
+        limits = self._effective_risk_limits(signal.metadata, snapshot)
         decision_steps = [
             f"策略信号：{signal.action.value}，置信度 {signal.confidence:.2f}，原因：{signal.reason}",
             f"AI 复核：{ai_decision.action.value}，置信度 {ai_decision.confidence:.2f}，原因：{ai_decision.reason}",
             f"合并结果：{action.value}，最终置信度 {confidence:.2f}",
+            "资金风控："
+            f"{'策略内部限制优先' if limits['priority'] == 'strategy' else '全局限制优先'}"
+            f"，单次金额={limits['trade_quote_size']:.2f}"
+            f"，最大持仓={limits['max_position_quote']:.2f}"
+            f"，最低置信度={limits['min_confidence']:.2f}",
         ]
         if execution_intent:
             intent_name = execution_intent.get("intent") or execution_intent.get("mode") or "-"
@@ -107,7 +113,7 @@ class TradingEngine:
         plan = TradePlan(
             symbol=trading_symbol,
             action=action,
-            quote_size=self.settings.trade_quote_size,
+            quote_size=limits["trade_quote_size"],
             confidence=confidence,
             reason=f"strategy={signal.reason}; ai={ai_decision.reason}",
             dry_run=dry_run,
@@ -116,7 +122,7 @@ class TradingEngine:
             decision_steps=decision_steps,
             execution_intent=execution_intent,
         )
-        return self._apply_risk(plan, snapshot.position_quote, market_type)
+        return self._apply_risk(plan, snapshot.position_quote, market_type, limits)
 
     async def execute_plan(self, plan: TradePlan, exchange_name: Optional[str] = None, market_type: str = "spot") -> OrderResult:
         exchange = self.build_exchange(exchange_name, market_type=market_type)
@@ -183,18 +189,41 @@ class TradingEngine:
         except Exception as exc:
             logger.warning("trade notification failed: %s", exc)
 
-    def _apply_risk(self, plan: TradePlan, position_quote: float, market_type: str = "spot") -> TradePlan:
-        if plan.action != TradeAction.hold and plan.confidence < self.settings.min_ai_confidence:
+    def _apply_risk(self, plan: TradePlan, position_quote: float, market_type: str = "spot", limits: Optional[dict[str, float]] = None) -> TradePlan:
+        limits = limits or {
+            "min_confidence": self.settings.min_ai_confidence,
+            "max_position_quote": self.settings.max_position_quote,
+        }
+        min_confidence = limits["min_confidence"]
+        max_position_quote = limits["max_position_quote"]
+        if plan.action != TradeAction.hold and plan.confidence < min_confidence:
             plan.blocked = True
-            plan.block_reason = f"confidence {plan.confidence:.2f} below threshold {self.settings.min_ai_confidence:.2f}"
+            plan.block_reason = f"confidence {plan.confidence:.2f} below threshold {min_confidence:.2f}"
             plan.decision_steps.append(f"风控拦截：{plan.block_reason}")
-        if plan.action == TradeAction.buy and position_quote + plan.quote_size > self.settings.max_position_quote:
+        if plan.action == TradeAction.buy and position_quote + plan.quote_size > max_position_quote:
             plan.blocked = True
-            plan.block_reason = f"position limit would exceed {self.settings.max_position_quote:.2f} quote"
+            plan.block_reason = f"position limit would exceed {max_position_quote:.2f} quote"
             plan.decision_steps.append(f"风控拦截：{plan.block_reason}")
         if market_type == "spot" and plan.execution_intent.get("requires_contract"):
             plan.decision_steps.append("提示：该策略包含合约语义；现货模式下会降级为买入/卖出/观望信号。")
         return plan
+
+    def _effective_risk_limits(self, metadata: dict[str, Any], snapshot: MarketSnapshot) -> dict[str, Any]:
+        global_limits = {
+            "priority": "global",
+            "trade_quote_size": self.settings.trade_quote_size,
+            "max_position_quote": self.settings.max_position_quote,
+            "min_confidence": self.settings.min_ai_confidence,
+        }
+        if self.settings.risk_limit_priority != "strategy":
+            return global_limits
+        strategy_limits = _strategy_risk_limits(metadata, snapshot)
+        return {
+            "priority": "strategy",
+            "trade_quote_size": strategy_limits.get("trade_quote_size") or global_limits["trade_quote_size"],
+            "max_position_quote": strategy_limits.get("max_position_quote") or global_limits["max_position_quote"],
+            "min_confidence": strategy_limits.get("min_confidence") or global_limits["min_confidence"],
+        }
 
 
 def _combine(strategy_action: TradeAction, strategy_confidence: float, ai_action: TradeAction, ai_confidence: float) -> TradeAction:
@@ -232,6 +261,80 @@ def _contract_preflight_error(plan: TradePlan) -> Optional[str]:
         if take_profit is not None and take_profit >= reference_price:
             return "short take_profit must be below reference price"
     return None
+
+
+def _strategy_risk_limits(metadata: dict[str, Any], snapshot: MarketSnapshot) -> dict[str, float]:
+    if not isinstance(metadata, dict):
+        return {}
+    risk = metadata.get("nofx_risk_control") if isinstance(metadata.get("nofx_risk_control"), dict) else {}
+    execution = metadata.get("execution_intent") if isinstance(metadata.get("execution_intent"), dict) else {}
+    matched_rule = metadata.get("matched_rule") if isinstance(metadata.get("matched_rule"), dict) else {}
+    sources = [matched_rule, execution, risk]
+    trade_quote_size = _first_positive(
+        sources,
+        "trade_quote_size",
+        "quote_size",
+        "order_quote_size",
+        "position_size_usd",
+        "base_order_size",
+        "min_position_size",
+    )
+    max_position_quote = _first_positive(
+        sources,
+        "max_position_quote",
+        "max_position_usd",
+        "max_position_size_usd",
+        "max_position_value",
+    )
+    if max_position_quote is None:
+        max_position_quote = _ratio_position_limit(snapshot, risk)
+    min_confidence = _normalize_confidence(_first_value(sources, "min_confidence", "minConfidence", "minimum_confidence"))
+    limits: dict[str, float] = {}
+    if trade_quote_size is not None:
+        limits["trade_quote_size"] = trade_quote_size
+    if max_position_quote is not None:
+        limits["max_position_quote"] = max_position_quote
+    if min_confidence is not None:
+        limits["min_confidence"] = min_confidence
+    return limits
+
+
+def _ratio_position_limit(snapshot: MarketSnapshot, risk: dict[str, Any]) -> Optional[float]:
+    base, quote = snapshot.symbol.split("/", 1)
+    ratio_key = "btc_eth_max_position_value_ratio" if base.upper() in {"BTC", "ETH"} else "altcoin_max_position_value_ratio"
+    ratio = _float_or_none(risk.get(ratio_key))
+    quote_balance = _float_or_none(snapshot.balances.get(quote))
+    if ratio is None or quote_balance is None or quote_balance <= 0:
+        return None
+    fraction = ratio if ratio <= 1 else ratio / 100
+    return quote_balance * fraction
+
+
+def _first_positive(sources: list[dict[str, Any]], *keys: str) -> Optional[float]:
+    value = _first_value(sources, *keys)
+    parsed = _float_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _first_value(sources: list[dict[str, Any]], *keys: str) -> Any:
+    for source in sources:
+        for key in keys:
+            if key in source:
+                return source[key]
+        lowered = {str(key).lower(): value for key, value in source.items()}
+        for key in keys:
+            if key.lower() in lowered:
+                return lowered[key.lower()]
+    return None
+
+
+def _normalize_confidence(value: Any) -> Optional[float]:
+    parsed = _float_or_none(value)
+    if parsed is None:
+        return None
+    if parsed > 1:
+        parsed /= 100
+    return min(max(parsed, 0.0), 1.0)
 
 
 def _float_or_none(value: object) -> Optional[float]:

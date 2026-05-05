@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 import re
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -101,6 +101,7 @@ class SettingsUpdate(BaseModel):
     default_timeframe: Optional[str] = None
     trade_quote_size: Optional[float] = None
     max_position_quote: Optional[float] = None
+    risk_limit_priority: Optional[Literal["global", "strategy"]] = None
     min_ai_confidence: Optional[float] = None
     exchange_id: Optional[str] = None
     exchange_api_key: Optional[str] = None
@@ -1714,6 +1715,12 @@ def _dashboard_html(page: str = "dashboard") -> str:
           <label>最大持仓金额
             <input id="cfg_max_position_quote" type="number" min="0" step="0.01">
           </label>
+          <label>资金风控优先级
+            <select id="cfg_risk_limit_priority">
+              <option value="global">全局限制优先</option>
+              <option value="strategy">策略内部限制优先</option>
+            </select>
+          </label>
           <label>最低 AI 置信度
             <input id="cfg_min_ai_confidence" type="number" min="0" max="1" step="0.01">
           </label>
@@ -1826,7 +1833,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
     const configIds = [
       'ai_provider', 'ai_model', 'ai_base_url', 'ai_api_key',
       'default_exchange', 'exchange_id', 'exchange_api_key', 'exchange_secret', 'exchange_password',
-      'default_symbol', 'default_timeframe', 'trade_quote_size', 'max_position_quote', 'min_ai_confidence',
+      'default_symbol', 'default_timeframe', 'trade_quote_size', 'max_position_quote', 'risk_limit_priority', 'min_ai_confidence',
       'serverchan_sendkey', 'live_trading_enabled', 'exchange_sandbox', 'notify_trade_success', 'notify_dry_run'
     ];
     const secretIds = new Set(['ai_api_key', 'exchange_api_key', 'exchange_secret', 'exchange_password', 'serverchan_sendkey']);

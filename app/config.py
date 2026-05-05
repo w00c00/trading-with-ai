@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     default_timeframe: str = "1h"
     trade_quote_size: float = Field(default=50.0, gt=0)
     max_position_quote: float = Field(default=200.0, gt=0)
+    risk_limit_priority: Literal["global", "strategy"] = "global"
     min_ai_confidence: float = Field(default=0.55, ge=0, le=1)
 
     exchange_id: str = "binance"

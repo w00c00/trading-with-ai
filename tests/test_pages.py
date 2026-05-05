@@ -25,6 +25,8 @@ def test_config_page_has_ai_dropdowns() -> None:
     assert "cfg_ai_base_url_custom" in response.text
     assert "MiniMax 中国区" in response.text
     assert "自定义 Base URL" in response.text
+    assert "cfg_risk_limit_priority" in response.text
+    assert "策略内部限制优先" in response.text
 
 
 def test_dashboard_has_balance_refresh_controls() -> None:
