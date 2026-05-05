@@ -52,9 +52,8 @@ class AIClient:
         content = data["choices"][0]["message"]["content"]
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
+        parsed = _parse_model_json(content)
+        if parsed is None:
             parsed = {"action": "hold", "confidence": 0.0, "reason": content[:500], "risk_notes": ["Model did not return JSON."]}
         parsed["_provider_response"] = data
         return parsed
@@ -92,3 +91,32 @@ def _normalize_model(provider: str, model: str) -> str:
         "m2.7-highspeed": "MiniMax-M2.7-highspeed",
     }
     return aliases.get(compact, model.strip())
+
+
+def _parse_model_json(content: Any) -> dict[str, Any] | None:
+    if isinstance(content, dict):
+        return content
+    text = str(content or "").strip()
+    candidates = [text]
+    fence_start = text.find("```")
+    while fence_start != -1:
+        content_start = text.find("\n", fence_start)
+        fence_end = text.find("```", content_start + 1 if content_start != -1 else fence_start + 3)
+        if content_start != -1 and fence_end != -1:
+            candidates.append(text[content_start:fence_end].strip())
+        fence_start = text.find("```", fence_end + 3 if fence_end != -1 else fence_start + 3)
+    object_start = text.find("{")
+    object_end = text.rfind("}")
+    if object_start != -1 and object_end > object_start:
+        candidates.append(text[object_start : object_end + 1])
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if candidate.lower().startswith("json"):
+            candidate = candidate[4:].strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None

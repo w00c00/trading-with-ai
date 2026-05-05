@@ -2210,6 +2210,8 @@ def _dashboard_html(page: str = "dashboard") -> str:
         clearInterval(runPollTimer);
         runPollTimer = null;
       }}
+      fields.lastRun.textContent = `循环运行：${{run.status || '-'}} / 轮次 ${{run.round || 0}}`;
+      rawOutput.textContent = JSON.stringify({{ run }}, null, 2);
       stopTradeRunButton.disabled = !['running', 'stopping'].includes(run.status);
       startTradeRunButton.disabled = ['running', 'stopping'].includes(run.status);
     }}
@@ -2362,7 +2364,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
       event.preventDefault();
       runButton.disabled = true;
       runButton.textContent = '运行中';
-      rawOutput.textContent = '正在请求 /run-once ...';
+      rawOutput.textContent = '正在请求 /run-once ... 如果启用了真实 AI 接口，通常需要等待 10-45 秒。';
       const payload = {{
         exchange: document.getElementById('exchange').value,
         symbol: document.getElementById('symbol').value.trim(),
@@ -2394,6 +2396,8 @@ def _dashboard_html(page: str = "dashboard") -> str:
       startTradeRunButton.disabled = true;
       stopTradeRunButton.disabled = false;
       fields.runStatus.textContent = '策略启动中';
+      fields.lastRun.textContent = '循环运行启动中';
+      rawOutput.textContent = '正在启动循环运行，启动成功后会在这里和实时看板同步显示状态。';
       try {{
         const response = await fetch('/runs/start', {{
           method: 'POST',
@@ -2410,6 +2414,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
         }}), 1200);
       }} catch (error) {{
         fields.runStatus.textContent = String(error.message || error);
+        rawOutput.textContent = String(error.message || error);
         startTradeRunButton.disabled = false;
         stopTradeRunButton.disabled = true;
       }}
@@ -2425,6 +2430,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
         renderRun(data.run);
       }} catch (error) {{
         fields.runStatus.textContent = String(error.message || error);
+        rawOutput.textContent = String(error.message || error);
         stopTradeRunButton.disabled = false;
       }}
     }});
