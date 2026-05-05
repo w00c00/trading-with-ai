@@ -938,9 +938,9 @@ def _dashboard_html(page: str = "dashboard") -> str:
     )
     strategy_labels_json = json.dumps(strategy_labels, ensure_ascii=False)
     nav_items = [
-        ("dashboard", "/dashboard", "Dashboard"),
-        ("trade", "/trade", "策略交易"),
-        ("batch", "/batch", "批量/模拟"),
+        ("dashboard", "/dashboard", "实时看板"),
+        ("trade", "/trade", "单策略运行"),
+        ("batch", "/batch", "多策略与回测"),
         ("grid", "/grid", "网格机器人"),
         ("strategies", "/strategy-center", "策略中心"),
         ("config", "/config", "配置"),
@@ -1272,7 +1272,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
     <div class="topbar">
       <div class="brand">
         <h1>Trading with AI 控制台</h1>
-        <div class="subtle">分模块操作：策略交易、机器人、配置和实时状态</div>
+        <div class="subtle">先在策略中心导入策略，再到单策略运行或多策略与回测里执行</div>
       </div>
       <div class="links">
         {nav_links}
@@ -1284,10 +1284,13 @@ def _dashboard_html(page: str = "dashboard") -> str:
   <main>
     <section class="page-section" data-page="trade">
       <div class="section-head">
-        <h2>交易参数</h2>
+        <h2>单策略运行</h2>
         <span class="badge" id="serviceStatus">检查中</span>
       </div>
       <form class="form" id="runForm">
+        <div class="notice">
+          适合运行一个策略和一个主标的。上传的新策略会出现在“策略”下拉菜单里；要多币种、多策略或历史回测，请去“多策略与回测”。
+        </div>
         <label>交易所
           <select id="exchange">
             <option value="paper">paper</option>
@@ -1369,9 +1372,9 @@ def _dashboard_html(page: str = "dashboard") -> str:
           <input id="execute" type="checkbox">
         </label>
         <div class="actions">
-          <button type="submit" class="primary" id="runButton">运行一次</button>
-          <button type="button" id="startTradeRunButton">开始策略运行</button>
-          <button type="button" id="stopTradeRunButton" disabled>停止策略运行</button>
+          <button type="submit" class="primary" id="runButton">单次决策</button>
+          <button type="button" id="startTradeRunButton">启动循环运行</button>
+          <button type="button" id="stopTradeRunButton" disabled>停止循环运行</button>
           <button type="button" id="clearButton">清空结果</button>
         </div>
       </form>
@@ -1404,11 +1407,14 @@ def _dashboard_html(page: str = "dashboard") -> str:
     </section>
     <section class="wide page-section" data-page="batch">
       <div class="section-head">
-        <h2>批量运行与策略模拟</h2>
+        <h2>多策略运行与历史回测</h2>
         <span class="subtle" id="multiStatus">待命</span>
       </div>
       <div class="runner-grid">
         <div class="form">
+          <div class="notice">
+            适合同时跑多个币种或多个策略，也可以用指定时间段做历史回测。这里勾选的策略包含你在策略中心上传的自定义/NOFX 策略。
+          </div>
           <label>多币种
             <input id="multiSymbols" value="BTC/USDT, ETH/USDT" autocomplete="off">
           </label>
@@ -1453,9 +1459,9 @@ def _dashboard_html(page: str = "dashboard") -> str:
             <input id="multiExecute" type="checkbox">
           </label>
           <div class="actions">
-            <button type="button" class="primary" id="batchRunButton">批量运行</button>
-            <button type="button" id="simulateButton">策略模拟</button>
-            <button type="button" id="startRunButton">开始执行</button>
+            <button type="button" class="primary" id="batchRunButton">批量单次决策</button>
+            <button type="button" id="simulateButton">历史回测</button>
+            <button type="button" id="startRunButton">启动多策略运行</button>
           </div>
         </div>
         <div class="content">
@@ -1583,6 +1589,9 @@ def _dashboard_html(page: str = "dashboard") -> str:
       </div>
       <div class="dashboard-grid">
         <div class="form">
+          <div class="notice">
+            这里负责导入和管理策略，不负责执行。上传成功后，到“单策略运行”选择一个策略运行；需要多币种、多策略或历史验证时，到“多策略与回测”勾选。
+          </div>
           <div class="actions">
             <button type="button" id="loadTemplateButton">载入模板</button>
             <button type="button" id="loadNofxTemplateButton">载入 NOFX 模板</button>
@@ -1597,7 +1606,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
         </div>
         <div class="content">
           <div class="notice">
-            支持 JSON 规则策略和 NOFX StrategyConfig 兼容导入，不执行上传代码。可用指标：rsi、sma_cross、price_vs_sma、breakout。NOFX 配置会转换为本系统可运行的规则策略，并保留原始配置。
+            支持 JSON 规则策略和 NOFX StrategyConfig 兼容导入，不执行上传代码。可用指标：rsi、sma_cross、price_vs_sma、breakout。NOFX 配置会转换为本系统可运行的规则策略，并保留原始配置。上传后无需重启，运行页会自动出现该策略。
           </div>
           <pre id="strategyUploadOutput">等待策略模板或上传...</pre>
         </div>
@@ -1605,7 +1614,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
     </section>
     <section class="wide page-section" data-page="dashboard">
       <div class="section-head">
-        <h2>实时执行 Dashboard</h2>
+        <h2>实时运行看板</h2>
         <span class="subtle" id="runStatus">未开始</span>
       </div>
       <div class="status-grid">
@@ -2375,7 +2384,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
         rawOutput.textContent = String(error.message || error);
       }} finally {{
         runButton.disabled = false;
-        runButton.textContent = '运行一次';
+        runButton.textContent = '单次决策';
       }}
     }});
 

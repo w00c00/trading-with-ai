@@ -18,6 +18,22 @@ def test_module_pages_render() -> None:
         assert "Trading with AI 控制台" in response.text
 
 
+def test_pages_explain_strategy_run_flow() -> None:
+    client = TestClient(app)
+    trade = client.get("/trade").text
+    assert "单策略运行" in trade
+    assert "上传的新策略会出现在“策略”下拉菜单里" in trade
+    assert "启动循环运行" in trade
+
+    batch = client.get("/batch").text
+    assert "多策略运行与历史回测" in batch
+    assert "历史回测" in batch
+    assert "启动多策略运行" in batch
+
+    strategies = client.get("/strategy-center").text
+    assert "这里负责导入和管理策略，不负责执行" in strategies
+
+
 def test_config_page_has_ai_dropdowns() -> None:
     response = TestClient(app).get("/config")
     assert response.status_code == 200
