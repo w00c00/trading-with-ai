@@ -16,6 +16,7 @@ from app.ai import AIDecisionMaker, AIClient
 from app.config import get_settings
 from app.engine import TradingEngine
 from app.grid import GRID_STRATEGIES, GridPlanRequest, build_grid_plan
+from app.notifications import ServerChanNotifier
 from app.secure_config import load_encrypted_config, merge_config_update, public_config_snapshot, save_encrypted_config
 from app.strategies import STRATEGIES
 from app.strategies.custom import nofx_strategy_template, save_custom_strategy, strategy_template
@@ -113,6 +114,10 @@ class SettingsUpdate(BaseModel):
     serverchan_sendkey: Optional[str] = None
     notify_trade_success: Optional[bool] = None
     notify_dry_run: Optional[bool] = None
+
+
+class ServerChanTestRequest(BaseModel):
+    sendkey: Optional[str] = None
 
 
 def _reload_runtime() -> None:
@@ -227,6 +232,52 @@ async def write_settings(update: SettingsUpdate) -> dict[str, Any]:
     save_encrypted_config(merged)
     _reload_runtime()
     return {"settings": public_config_snapshot(settings.model_dump(mode="json"))}
+
+
+@app.get("/balances")
+async def balances(exchange: Optional[str] = None, market_type: str = "spot") -> dict[str, Any]:
+    selected_exchange = exchange or settings.default_exchange
+    try:
+        client = engine.build_exchange(selected_exchange, market_type=market_type)
+        raw_balances = await client.fetch_balances()
+    except Exception as exc:
+        logger.exception("balance refresh failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+    assets = [
+        {"asset": asset, "amount": amount}
+        for asset, amount in sorted(raw_balances.items(), key=lambda item: item[0])
+    ]
+    available = bool(assets) or client.id == "paper"
+    message = "余额已刷新" if available else "余额不可用：请检查 API Key、Secret、账户权限或交易所类型。"
+    return {
+        "exchange": client.id,
+        "market_type": market_type,
+        "available": available,
+        "message": message,
+        "updated_at": time.time(),
+        "balances": raw_balances,
+        "assets": assets,
+    }
+
+
+@app.post("/notifications/serverchan/test")
+async def test_serverchan(request: Optional[ServerChanTestRequest] = None) -> dict[str, Any]:
+    sendkey = ((request.sendkey if request else None) or settings.serverchan_sendkey or "").strip()
+    if not sendkey:
+        raise HTTPException(status_code=400, detail="未配置方糖 SendKey")
+    notifier = ServerChanNotifier(settings)
+    notifier.sendkey = sendkey
+    try:
+        sent = await notifier.send(
+            "Trading with AI 方糖测试",
+            f"这是一条方糖可用性测试消息。\n\n发送时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        )
+    except Exception as exc:
+        logger.exception("serverchan test failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+    if not sent:
+        raise HTTPException(status_code=400, detail="方糖推送未发送，请检查 SendKey")
+    return {"ok": True, "message": "方糖测试推送已发送"}
 
 
 @app.post("/run-once")
@@ -1563,6 +1614,25 @@ def _dashboard_html(page: str = "dashboard") -> str:
         <div class="metric"><span>事件数</span><strong id="runEventCountValue">-</strong></div>
       </div>
       <div class="content">
+        <div class="section-head compact-head">
+          <h3>交易所可用余额</h3>
+          <button type="button" id="refreshBalancesButton">刷新余额</button>
+        </div>
+        <div class="status-grid">
+          <div class="metric"><span>交易所</span><strong id="balanceExchangeValue">-</strong></div>
+          <div class="metric"><span>市场类型</span><strong id="balanceMarketTypeValue">-</strong></div>
+          <div class="metric"><span>更新时间</span><strong id="balanceUpdatedAtValue">-</strong></div>
+          <div class="metric"><span>状态</span><strong id="balanceStatus">未刷新</strong></div>
+        </div>
+        <div class="notice" id="balanceMessage">点击刷新余额会读取当前配置的交易所账户；密钥不会在页面显示。</div>
+        <table>
+          <thead>
+            <tr><th>资产</th><th>总余额</th></tr>
+          </thead>
+          <tbody id="balanceTable"><tr><td colspan="2">暂无余额，请点击刷新。</td></tr></tbody>
+        </table>
+      </div>
+      <div class="content">
         <table>
           <thead>
             <tr><th>类型</th><th>标的</th><th>策略</th><th>轮次/置信度</th><th>状态</th></tr>
@@ -1669,6 +1739,8 @@ def _dashboard_html(page: str = "dashboard") -> str:
         </div>
         <div class="settings-actions">
           <div class="notice" id="secretNotice">密钥字段保存后会加密落盘；再次打开只显示已配置状态，留空不会覆盖原值。</div>
+          <span class="subtle" id="serverChanTestStatus">未测试</span>
+          <button type="button" id="testServerChanButton">测试方糖推送</button>
           <button type="submit" class="primary" id="saveSettingsButton">保存配置</button>
         </div>
       </form>
@@ -1688,6 +1760,8 @@ def _dashboard_html(page: str = "dashboard") -> str:
     const settingsForm = document.getElementById('settingsForm');
     const runButton = document.getElementById('runButton');
     const saveSettingsButton = document.getElementById('saveSettingsButton');
+    const testServerChanButton = document.getElementById('testServerChanButton');
+    const refreshBalancesButton = document.getElementById('refreshBalancesButton');
     const clearButton = document.getElementById('clearButton');
     const batchRunButton = document.getElementById('batchRunButton');
     const simulateButton = document.getElementById('simulateButton');
@@ -1708,6 +1782,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
     const gridEventsTable = document.getElementById('gridEventsTable');
     const gridOutput = document.getElementById('gridOutput');
     const runEventTable = document.getElementById('runEventTable');
+    const balanceTable = document.getElementById('balanceTable');
     const chartCanvas = document.getElementById('strategyChart');
     let currentRunId = null;
     let runPollTimer = null;
@@ -1736,6 +1811,12 @@ def _dashboard_html(page: str = "dashboard") -> str:
       runState: document.getElementById('runStateValue'),
       runRound: document.getElementById('runRoundValue'),
       runEventCount: document.getElementById('runEventCountValue'),
+      balanceStatus: document.getElementById('balanceStatus'),
+      balanceExchange: document.getElementById('balanceExchangeValue'),
+      balanceMarketType: document.getElementById('balanceMarketTypeValue'),
+      balanceUpdatedAt: document.getElementById('balanceUpdatedAtValue'),
+      balanceMessage: document.getElementById('balanceMessage'),
+      serverChanTestStatus: document.getElementById('serverChanTestStatus'),
       gridStatus: document.getElementById('gridStatus'),
       gridBotId: document.getElementById('gridBotId'),
       gridBotState: document.getElementById('gridBotState'),
@@ -2117,6 +2198,41 @@ def _dashboard_html(page: str = "dashboard") -> str:
       startTradeRunButton.disabled = ['running', 'stopping'].includes(run.status);
     }}
 
+    function renderBalances(data) {{
+      fields.balanceExchange.textContent = data.exchange || '-';
+      fields.balanceMarketType.textContent = data.market_type || '-';
+      fields.balanceUpdatedAt.textContent = data.updated_at ? new Date(data.updated_at * 1000).toLocaleString() : '-';
+      fields.balanceStatus.textContent = data.available ? '可用' : '不可用';
+      fields.balanceMessage.textContent = data.message || '-';
+      const rows = (data.assets || []).map((item) => {{
+        const amount = Number(item.amount || 0).toLocaleString(undefined, {{ maximumFractionDigits: 8 }});
+        return `<tr><td>${{escapeHtml(item.asset)}}</td><td>${{amount}}</td></tr>`;
+      }});
+      balanceTable.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="2">没有读取到余额。</td></tr>';
+    }}
+
+    async function refreshBalances() {{
+      refreshBalancesButton.disabled = true;
+      refreshBalancesButton.textContent = '刷新中';
+      fields.balanceStatus.textContent = '刷新中';
+      try {{
+        const exchange = document.getElementById('exchange').value || cfgElement('default_exchange').value || 'paper';
+        const marketType = document.getElementById('tradeMarketType').value || document.getElementById('multiMarketType').value || 'spot';
+        const params = new URLSearchParams({{ exchange, market_type: marketType }});
+        const response = await fetch('/balances?' + params.toString());
+        const data = await readJsonOrText(response);
+        if (!response.ok) throw new Error(data.detail || '余额刷新失败');
+        renderBalances(data);
+      }} catch (error) {{
+        fields.balanceStatus.textContent = '刷新失败';
+        fields.balanceMessage.textContent = String(error.message || error);
+        balanceTable.innerHTML = '<tr><td colspan="2">余额读取失败，请检查交易所配置。</td></tr>';
+      }} finally {{
+        refreshBalancesButton.disabled = false;
+        refreshBalancesButton.textContent = '刷新余额';
+      }}
+    }}
+
     function renderGridPlan(plan) {{
       fields.gridCurrentPrice.textContent = Number(plan.current_price || 0).toFixed(4);
       fields.gridEventCount.textContent = plan.price_source || '-';
@@ -2257,6 +2373,7 @@ def _dashboard_html(page: str = "dashboard") -> str:
     }});
 
     clearButton.addEventListener('click', reset);
+    refreshBalancesButton.addEventListener('click', refreshBalances);
     startTradeRunButton.addEventListener('click', async () => {{
       startTradeRunButton.disabled = true;
       stopTradeRunButton.disabled = false;
@@ -2460,6 +2577,26 @@ def _dashboard_html(page: str = "dashboard") -> str:
       }}
     }});
     cfgElement('ai_provider').addEventListener('change', () => updateProviderHint(true));
+    testServerChanButton.addEventListener('click', async () => {{
+      testServerChanButton.disabled = true;
+      fields.serverChanTestStatus.textContent = '发送中';
+      try {{
+        const typedSendkey = cfgElement('serverchan_sendkey').value.trim();
+        const payload = typedSendkey ? {{ sendkey: typedSendkey }} : {{}};
+        const response = await fetch('/notifications/serverchan/test', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify(payload)
+        }});
+        const data = await readJsonOrText(response);
+        if (!response.ok) throw new Error(data.detail || '方糖测试失败');
+        fields.serverChanTestStatus.textContent = data.message || '测试已发送';
+      }} catch (error) {{
+        fields.serverChanTestStatus.textContent = String(error.message || error);
+      }} finally {{
+        testServerChanButton.disabled = false;
+      }}
+    }});
     settingsForm.addEventListener('submit', async (event) => {{
       event.preventDefault();
       saveSettingsButton.disabled = true;

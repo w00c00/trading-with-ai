@@ -25,3 +25,18 @@ def test_config_page_has_ai_dropdowns() -> None:
     assert "cfg_ai_base_url_custom" in response.text
     assert "MiniMax 中国区" in response.text
     assert "自定义 Base URL" in response.text
+
+
+def test_dashboard_has_balance_refresh_controls() -> None:
+    response = TestClient(app).get("/dashboard")
+    assert response.status_code == 200
+    assert "refreshBalancesButton" in response.text
+    assert "balanceTable" in response.text
+    assert "交易所可用余额" in response.text
+
+
+def test_config_has_serverchan_test_button() -> None:
+    response = TestClient(app).get("/config")
+    assert response.status_code == 200
+    assert "testServerChanButton" in response.text
+    assert "serverChanTestStatus" in response.text
